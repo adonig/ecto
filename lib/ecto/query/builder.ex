@@ -74,8 +74,8 @@ defmodule Ecto.Query.Builder do
   with `^index` in the query where index is a number indexing into the
   map.
   """
-  @spec escape(Macro.t, quoted_type | {:in, quoted_type} | {:out, quoted_type}, {list, acc},
-               Keyword.t, Macro.Env.t | {Macro.Env.t, fun}) :: {Macro.t, {list, acc}}
+  @spec escape(Macro.t, quoted_type | {:in, quoted_type} | {:out, quoted_type} | {:splice, quoted_type},
+               {list, acc}, Keyword.t, Macro.Env.t | {Macro.Env.t, fun}) :: {Macro.t, {list, acc}}
   def escape(expr, type, params_acc, vars, env)
 
   # var.x - where var is bound
@@ -416,13 +416,10 @@ defmodule Ecto.Query.Builder do
     """
   end
 
-  def escape({:selected_as, _, [name]}, _type, params_acc, _vars, _env) when is_atom(name) do
+  def escape({:selected_as, _, [name]}, _type, params_acc, _vars, _env) do
+    name = quoted_atom!(name, "selected_as/1")
     expr = {:{}, [], [:selected_as, [], [name]]}
     {expr, params_acc}
-  end
-
-  def escape({:selected_as, _, [name]}, _type, _params_acc, _vars, _env) do
-    error! "selected_as/1 expects `name` to be an atom, got `#{inspect(name)}`"
   end
 
   def escape({quantifier, meta, [subquery]}, type, params_acc, vars, env) when quantifier in [:all, :any, :exists] do
@@ -632,14 +629,7 @@ defmodule Ecto.Query.Builder do
 
   defp escape_field!({kind, _, [value]}, field, _vars)
        when kind in [:as, :parent_as] do
-    value =
-      case value do
-        {:^, _, [value]} ->
-          value
-
-        other ->
-          quoted_atom!(other, "#{kind}/1")
-      end
+    value = late_binding!(kind, value)
     as    = {:{}, [], [kind, [], [value]]}
     field = quoted_atom!(field, "field/2")
     dot   = {:{}, [], [:., [], [as, field]]}
@@ -691,6 +681,20 @@ defmodule Ecto.Query.Builder do
 
       _ ->
         error! "literal/1 in fragment expects an interpolated value, such as literal(^value), got `#{Macro.to_string(expr)}`"
+    end
+  end
+
+  defp escape_fragment({:splice, _meta, [splice]}, params_acc, vars, env) do
+    case splice do
+      {:^, _, [value]} = expr ->
+        checked = quote do: Ecto.Query.Builder.splice!(unquote(value))
+        length = quote do: length(unquote(checked))
+        {expr, params_acc} = escape(expr, {:splice, :any}, params_acc, vars, env)
+        escaped =  {:{}, [], [:splice, [], [expr, length]]}
+        {escaped, params_acc}
+
+      _ ->
+        error! "splice/1 in fragment expects an interpolated value, such as splice(^value), got `#{Macro.to_string(splice)}`"
     end
   end
 
@@ -756,6 +760,9 @@ defmodule Ecto.Query.Builder do
     do: {find_var!(var, vars), field}
   def validate_type!({:field, _, [{var, _, context}, field]}, vars, _env)
     when is_atom(var) and is_atom(context) and is_atom(field),
+    do: {find_var!(var, vars), field}
+  def validate_type!({:field, _, [{var, _, context}, {:^, _, [field]}]}, vars, _env)
+    when is_atom(var) and is_atom(context),
     do: {find_var!(var, vars), field}
 
   def validate_type!(type, _vars, _env) do
@@ -989,6 +996,20 @@ defmodule Ecto.Query.Builder do
   def atom!(other, used_ref),
     do: error!("expected atom in #{used_ref}, got: `#{inspect other}`")
 
+  @doc """
+  Checks if the value of a late binding is an interpolation or
+  a quoted atom.
+  """
+  def late_binding!(kind, value) do
+    case value do
+      {:^, _, [value]} ->
+        value
+
+      other ->
+        quoted_atom!(other, "#{kind}/1")
+    end
+  end
+
   defp escape_json_path(path) when is_list(path) do
     Enum.map(path, &quoted_json_path_element!/1)
   end
@@ -1082,6 +1103,18 @@ defmodule Ecto.Query.Builder do
   end
 
   @doc """
+  Called by escaper at runtime to verify splice in fragments.
+  """
+  def splice!(value) do
+    if is_list(value) do
+      value
+    else
+      raise ArgumentError,
+            "splice(^value) expects `value` to be a list, got `#{inspect(value)}`"
+    end
+  end
+
+  @doc """
   Called by escaper at runtime to verify that value is a valid interval.
   """
   @interval ~w(year month week day hour minute second millisecond microsecond)
@@ -1114,9 +1147,21 @@ defmodule Ecto.Query.Builder do
     when is_atom(var) and is_atom(context) and is_atom(field),
     do: {find_var!(var, vars), field}
 
+  def quoted_type({{:., _, [{kind, _, [value]}, field]}, _, []}, _vars)
+      when kind in [:as, :parent_as] do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, field}
+  end
+
   def quoted_type({:field, _, [{var, _, context}, field]}, vars)
     when is_atom(var) and is_atom(context) and is_atom(field),
     do: {find_var!(var, vars), field}
+
+  def quoted_type({:field, _, [{kind, _, [value]}, field]}, _vars)
+      when kind in [:as, :parent_as] and is_atom(field) do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, field}
+  end
 
   # Unquoting code here means the second argument of field will
   # always be unquoted twice, one by the type checking and another
@@ -1125,6 +1170,12 @@ defmodule Ecto.Query.Builder do
   def quoted_type({:field, _, [{var, _, context}, {:^, _, [code]}]}, vars)
     when is_atom(var) and is_atom(context),
     do: {find_var!(var, vars), code}
+
+  def quoted_type({:field, _, [{kind, _, [value]}, {:^, _, [code]}]}, _vars)
+      when kind in [:as, :parent_as] do
+    value = late_binding!(kind, value)
+    {{:{}, [], [kind, [], [value]]}, code}
+  end
 
   # Interval
   def quoted_type({:datetime_add, _, [_, _, _]}, _vars), do: :naive_datetime
@@ -1243,7 +1294,7 @@ defmodule Ecto.Query.Builder do
   @doc """
   Called by the select escaper at compile time and dynamic builder at runtime to track select aliases
   """
-  def add_select_alias(aliases, name) do
+  def add_select_alias(aliases, name) when is_map(aliases) and is_atom(name) do
     case aliases do
       %{^name => _} ->
         error! "the alias `#{inspect(name)}` has been specified more than once using `selected_as/2`"
@@ -1251,6 +1302,16 @@ defmodule Ecto.Query.Builder do
       aliases ->
         Map.put(aliases, name, @select_alias_dummy_value)
     end
+  end
+
+  def add_select_alias(aliases, name) do
+    aliases =
+      case aliases do
+        %{} -> Macro.escape(aliases)
+        aliases -> aliases
+      end
+
+    quote do: Ecto.Query.Builder.add_select_alias(unquote(aliases), unquote(name))
   end
 
   @doc """

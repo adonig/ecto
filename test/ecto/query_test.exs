@@ -554,20 +554,34 @@ defmodule Ecto.QueryTest do
       assert query.from.hints == ["hello", "world"]
     end
 
-    test "binary values are expected to be compile-time strings or list of strings" do
+    test "supports interpolation through unsafe_fragment" do
+      hint = "fragment"
+      query = from "posts", hints: unsafe_fragment(^hint)
+      assert query.from.hints == ["fragment"]
+
+      hint = "hint"
+      query = from "posts", hints: ["string", unsafe_fragment(^hint)]
+      assert query.from.hints == ["string", "hint"]
+    end
+
+    test "are expected to be strings or unsafe fragments that evaluate to strings" do
       assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
         quote_and_eval(from "posts", hints: 123)
       end
 
       assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
-        quote_and_eval(from "posts", join: "comments", on: true, hints: 123)
+        quote_and_eval(from "posts", hints: ["string", :atom])
       end
-    end
 
-    test "tuple values are not checked for contents" do
-      hint = "hint_from_config"
-      query = from "posts", hints: [dynamic: hint, number: 123]
-      assert query.from.hints == [dynamic: hint, number: 123]
+      assert_raise Ecto.Query.CompileError, ~r"`hints` must be a compile time string", fn ->
+        quote_and_eval(from "posts", hints: unsafe_fragment(^123))
+      end
+
+      msg = ~r"`unsafe_fragment/1` in `hints` expects an interpolated value"
+
+      assert_raise Ecto.Query.CompileError, msg, fn ->
+        quote_and_eval(from "posts", hints: ["string", unsafe_fragment("123")])
+      end
     end
   end
 
@@ -780,10 +794,10 @@ defmodule Ecto.QueryTest do
 
       excluded_left_lateral_query = exclude(left_lateral_query, :left_lateral_join)
       assert excluded_left_lateral_query.joins == base.joins
-      
+
       excluded_array_query = exclude(array_query, :array_join)
       assert excluded_array_query.joins == base.joins
-      
+
       excluded_left_array_query = exclude(left_array_query, :left_array_join)
       assert excluded_left_array_query.joins == base.joins
     end
@@ -868,13 +882,13 @@ defmodule Ecto.QueryTest do
       assert map_size(excluded_left_lateral_join_query.aliases) == original_aliases_number - 1
       refute Map.has_key?(excluded_left_lateral_join_query.aliases, :blogs_ll)
       assert Map.has_key?(excluded_left_lateral_join_query.aliases, :base)
-      
+
       excluded_array_join_query = exclude(query, :array_join)
       assert length(excluded_array_join_query.joins) == original_joins_number - 1
       assert map_size(excluded_array_join_query.aliases) == original_aliases_number - 1
       refute Map.has_key?(excluded_array_join_query.aliases, :blogs_a)
       assert Map.has_key?(excluded_array_join_query.aliases, :base)
-      
+
       excluded_left_array_join_query = exclude(query, :left_array_join)
       assert length(excluded_left_array_join_query.joins) == original_joins_number - 1
       assert map_size(excluded_left_array_join_query.aliases) == original_aliases_number - 1
@@ -988,6 +1002,30 @@ defmodule Ecto.QueryTest do
 
       assert_raise ArgumentError, "literal(^value) expects `value` to be a string, got `123`", fn ->
         from p in "posts", select: fragment("? COLLATE ?", p.name, literal(^123))
+      end
+    end
+
+    test "supports list splicing" do
+      two = 2
+      three = 3
+
+      query =
+        from p in "posts", where: p.id in fragment("(?, ?, ?)", ^1, splice(^[two, three, 4]), ^5)
+
+      assert {:in, _, [_, {:fragment, _, parts}]} = hd(query.wheres).expr
+
+      assert [
+               raw: "(",
+               expr: {:^, _, [0]},
+               raw: ", ",
+               expr: {:splice, _, [{:^, _, [1]}, 3]},
+               raw: ", ",
+               expr: {:^, _, [2]},
+               raw: ")"
+             ] = parts
+
+      assert_raise ArgumentError, "splice(^value) expects `value` to be a list, got `234`", fn ->
+        from p in "posts", where: p.id in fragment("(?)", splice(^234))
       end
     end
 

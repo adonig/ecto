@@ -421,6 +421,31 @@ defmodule Ecto.Query.API do
   > Because literals are made part of the query, each interpolated
   > literal will generate a separate query, with its own cache.
 
+  ## Splicing
+
+  Sometimes you may need to interpolate a variable number of arguments
+  into the same fragment. For example, when overriding Ecto's default
+  `where` behaviour for Postgres:
+
+      from p in Post, where: fragment("? in (?, ?)", p.id, val1, val2)
+
+  The example above will only work if you know the number of arguments
+  upfront. If it can vary, the above will not work.
+
+  You can address this by telling Ecto to splice a list argument into
+  the fragment:
+
+      from p in Post, where: fragment("? in (?)", p.id, splice(^val_list))
+
+  This will let Ecto know it should expand the values of the list into
+  separate fragment arguments. For example:
+
+      from p in Post, where: fragment("? in (?)", p.id, splice(^[1, 2, 3]))
+
+  would be expanded into
+
+      from p in Post, where: fragment("? in (?,?,?)", p.id, ^1, ^2, ^3)
+
   ## Defining custom functions using macros and fragment
 
   You can add a custom Ecto query function using macros.  For example
@@ -452,6 +477,81 @@ defmodule Ecto.Query.API do
 
   """
   def fragment(fragments), do: doc! [fragments]
+
+  @doc """
+  Allows a literal identifier to be injected into a fragment:
+
+      collation = "es_ES"
+      fragment("? COLLATE ?", ^name, literal(^collation))
+
+  The example above will inject `collation` into the query as
+  a literal identifier instead of a query parameter. Note that
+  each different value of `collation` will emit a different query,
+  which will be independently prepared and cached.
+  """
+  def literal(binary), do: doc! [binary]
+
+  @doc """
+  Allows a list argument to be spliced into a fragment.
+
+      from p in Post, where: fragment("? in (?)", p.id, splice(^[1, 2, 3]))
+
+  The example above will be transformed at runtime into the following:
+
+      from p in Post, where: fragment("? in (?,?,?)", p.id, ^1, ^2, ^3)
+  """
+  def splice(list), do: doc! [list]
+
+  @doc """
+  Creates a values list/constant table.
+
+  A values list can be used as a source in a query, both in `Ecto.Query.from/2`
+  and `Ecto.Query.join/5`.
+
+  The first argument is a list of maps representing the values of the constant table.
+  Each entry in the list must have exactly the same fields or an error is raised.
+
+  The second argument is a map of types corresponding to the fields in the first argument.
+  Each field must be given a type or an error is raised. Any type that can be specified in
+  a schema may be used.
+
+  ## Select example
+
+      values = [%{id: 1, text: "abc"}, %{id: 2, text: "xyz"}]
+      types = %{id: :integer, text: :string}
+
+      query =
+        from v1 in values(values, types),
+          join: v2 in values(values, types),
+          on: v1.id == v2.id
+
+      Repo.all(query)
+
+  ## Delete example
+      values = [%{id: 1, text: "abc"}, %{id: 2, text: "xyz"}]
+      types = %{id: :integer, text: :string}
+
+      query =
+        from p in Post,
+          join: v in values(values, types),
+          on: p.id == v.id,
+          where: p.counter == ^0
+
+      Repo.delete_all(query)
+
+  ## Update example
+      values = [%{id: 1, text: "abc"}, %{id: 2, text: "xyz"}]
+      types = %{id: :integer, text: :string}
+
+      query =
+        from p in Post,
+          join: v in values(values, types),
+          on: p.id == v.id,
+          update: [set: [text: v.text]]
+
+      Repo.update_all(query, [])
+  """
+  def values(values, types), do: doc! [values, types]
 
   @doc """
   Allows a field to be dynamically accessed.
